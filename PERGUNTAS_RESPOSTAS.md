@@ -16,19 +16,30 @@ Para garantir o tamanho fixo, usei:
 - Arrays de tamanho fixo: `char categoria[64]`, `char nome[128]`
 - Função `safe_copy()` que trunca strings longas e adiciona `\0`
 
-### 2. Por que pedidos têm tamanho variável?
+### 2. Por que pedidos têm tamanho fixo com array de 50 posições?
 
 **Resposta:**
-Pedidos têm tamanho variável porque cada pedido pode ter quantidades diferentes de itens:
-- Um pedido pode ter 1 item (12 bytes cabeçalho + 8 bytes = 20 bytes total)
-- Outro pode ter 100 itens (12 bytes + 800 bytes = 812 bytes total)
+Pedidos têm tamanho fixo (412 bytes) para atender o requisito do trabalho:
+> "Os registros dos arquivos de dados devem ser de tamanho fixo"
 
 Estrutura:
-```
-[PedidoHdr: 12 bytes] [id_produto_1: 8 bytes] [id_produto_2: 8 bytes] ...
+```c
+typedef struct {
+    int64_t id_pedido;                      // 8 bytes
+    int32_t n_itens;                        // 4 bytes
+    int64_t ids_produtos[MAX_ITENS_PEDIDO]; // 400 bytes (50 × 8)
+} Pedido;                                   // Total: 412 bytes
 ```
 
-Se usasse tamanho fixo, teria que reservar espaço para o máximo de itens possível, desperdiçando muito espaço.
+**Vantagens do tamanho fixo:**
+- Facilita cálculo de offsets: `offset_pedido_N = N × 412`
+- Permite acesso direto com `fseek()` sem ler registros anteriores
+- Atende o requisito do trabalho
+
+**Trade-off:**
+- Desperdiça espaço: pedido com 1 item usa 412 bytes (400 bytes desperdiçados)
+- Limita tamanho: máximo 50 itens por pedido
+- Mas: atende o requisito de tamanho fixo!
 
 ### 3. Por que índice esparso para produtos e denso para pedidos?
 
@@ -42,9 +53,9 @@ Se usasse tamanho fixo, teria que reservar espaço para o máximo de itens poss�
 - Após busca binária no índice, faço varredura linear de no máximo 256 produtos
 
 **Índice denso para pedidos:**
-- Pedidos têm tamanho VARIÁVEL
-- NÃO posso calcular offset matematicamente
-- Preciso saber exatamente onde cada pedido começa
+- Pedidos têm tamanho FIXO (412 bytes) mas ainda uso índice denso
+- PODERIA calcular offset matematicamente: `offset = N × 412`
+- Mas uso índice denso para facilitar busca por `id_pedido` (que não é sequencial)
 - Índice denso: 1 entrada por pedido
 - Permite acesso direto O(log n) sem varredura linear
 

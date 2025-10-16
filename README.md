@@ -43,24 +43,23 @@ typedef struct {
 **Índice**: `joias.idx` — índice **parcial/esparso** (amostragem a cada 256 registros)
 
 ### Arquivo 2: `pedidos.dat` (Registro de Compras/Pedidos)
-**Tipo**: Arquivo binário de registros de **tamanho variável**  
+**Tipo**: Arquivo binário de registros de **tamanho fixo** (412 bytes)  
 **Ordenação**: Por `id_pedido` (campo chave, não repetido)  
 **Estrutura do registro**:
 ```c
-// Cabeçalho fixo (12 bytes):
-typedef struct {
-    int64_t id_pedido;       // Campo CHAVE (não repetido) - 8 bytes
-    int32_t n_itens;         // Quantidade de itens - 4 bytes
-} PedidoHdr;
+#define MAX_ITENS_PEDIDO 50
 
-// Seguido por n_itens valores int64_t (8 bytes cada):
-// int64_t id_produto[n_itens]  // IDs dos produtos (com repetição)
+typedef struct {
+    int64_t id_pedido;                      // Campo CHAVE (não repetido) - 8 bytes
+    int32_t n_itens;                        // Quantidade de itens - 4 bytes
+    int64_t ids_produtos[MAX_ITENS_PEDIDO]; // Array fixo de IDs - 400 bytes (50 × 8)
+} Pedido;                                   // Total: 412 bytes (tamanho fixo)
 ```
 
 **Campos**:
 - **`id_pedido`** (int64): identificador único do pedido — **CAMPO CHAVE** (não repetido)
-- **`n_itens`** (int32): quantidade total de itens no pedido — campo com repetição
-- **`id_produto[]`** (array de int64): lista de IDs dos produtos comprados — campo com repetição (um produto pode aparecer em vários pedidos)
+- **`n_itens`** (int32): quantidade de itens efetivamente usados no pedido (máximo 50) — campo com repetição
+- **`ids_produtos[50]`** (array fixo de int64): array de tamanho fixo com IDs dos produtos — campo com repetição (posições não usadas ficam zeradas)
 
 **Índice**: `pedidos.idx` — índice **denso** (uma entrada por pedido)
 
@@ -91,8 +90,8 @@ typedef struct {
 
 ## Como o índice de pedidos funciona (`pedidos.idx`)
 - Construção inicial acontece no `import`; e é **reconstruído automaticamente** após `add-pedido` e `remove-pedido` (`rebuild_pedidos_idx`).
-- Cada entrada tem (`id_pedido`, `offset`) para o **início do cabeçalho** dentro do `pedidos.dat`.
-- Consulta (`find-pedido`): busca binária em `pedidos.idx`, vai para `offset` em `pedidos.dat`, lê o cabeçalho (`id_pedido`, `n_itens`) e então lê `n_itens` ids de produto daquele pedido.
+- Cada entrada tem (`id_pedido`, `offset`) para o **início do registro** dentro do `pedidos.dat`.
+- Consulta (`find-pedido`): busca binária em `pedidos.idx`, vai para `offset` em `pedidos.dat`, lê o registro completo (412 bytes) e acessa os IDs dos produtos diretamente do array `ids_produtos[]`.
 
 ## Montagem e Ordenação dos Arquivos de Dados
 
@@ -126,8 +125,9 @@ Para a **criação inicial** dos arquivos de dados a partir do CSV, foi utilizad
 1. Lê todas as linhas do CSV em memória como array de `LinhaTmp`
 2. Ordena o array por `id_pedido` (chave primária) e `id_produto` (chave secundária) usando `qsort()` com `cmp_linha_by_pedido_then_prod`
 3. Agrupa linhas por `id_pedido` e expande quantidades (quantidade=5 → 5 ocorrências do id_produto)
-4. Grava sequencialmente no arquivo binário `pedidos.dat` (formato: cabeçalho + lista de ids)
-5. Constrói índice denso `pedidos.idx` (uma entrada por pedido)
+4. Preenche a estrutura `Pedido` (tamanho fixo 412 bytes) com os IDs no array `ids_produtos[]`
+5. Grava sequencialmente no arquivo binário `pedidos.dat`
+6. Constrói índice denso `pedidos.idx` (uma entrada por pedido)
 
 ### 2.2) Ordenação em Operações Posteriores
 
@@ -898,7 +898,7 @@ void write_joias(ProdutoTmp* arr, size_t n){
 
 ### Estruturas de Dados
 - **`Produto`** (tamanho fixo: 272 bytes): `id_produto(int64)` + `categoria[64]` + `marca[64]` + `nome[128]` + `preco(double)`
-- **`PedidoHdr`** (tamanho fixo: 12 bytes): `id_pedido(int64)` + `n_itens(int32)`
+- **`Pedido`** (tamanho fixo: 412 bytes): `id_pedido(int64)` + `n_itens(int32)` + `ids_produtos[50](int64)`
 - **`JoiasIdxEntry`** (16 bytes): `id_base(int64)` + `offset(uint64)`
 - **`PedidosIdxEntry`** (16 bytes): `id_pedido(int64)` + `offset(uint64)`
 
@@ -913,10 +913,11 @@ void write_joias(ProdutoTmp* arr, size_t n){
 
 #### Pedidos (add/remove)
 - **Estratégia**: merge streaming com arquivo temporário
-- **Motivo**: registros de tamanho variável e arquivo deve estar ordenado; merge permite inserção/remoção sem carregar tudo em RAM
+- **Motivo**: registros de tamanho fixo (412 bytes) e arquivo deve estar ordenado; merge permite inserção/remoção sem carregar tudo em RAM
 - **Complexidade**: O(n) onde n = número de pedidos
-- **Uso de memória**: O(1) — apenas 1 pedido por vez (cabeçalho + seus itens)
+- **Uso de memória**: O(1) — apenas 1 ou 2 registros `Pedido` por vez (412 bytes cada)
 - **Otimização**: usa arquivo temporário (`pedidos.tmp`) e depois renomeia, evitando corrupção em caso de falha
+- **Limitação**: pedidos com mais de 50 itens são truncados (MAX_ITENS_PEDIDO = 50)
 
 ### Reconstrução de Índices
 - **`joias.idx`**: reconstruído após `add-produto` e `remove-produto` via `build_joias_idx()` — O(n/256) onde n = número de produtos
@@ -935,10 +936,10 @@ void write_joias(ProdutoTmp* arr, size_t n){
 
 ### ✅ Requisito 2.1 - Arquivos de Dados
 - [x] **Dois arquivos criados**: `joias.dat` (produtos) e `pedidos.dat` (compras)
-- [x] **Mínimo 3 campos por arquivo**: ambos têm 5+ campos
+- [x] **Mínimo 3 campos por arquivo**: ambos têm 3+ campos
 - [x] **Campo chave não repetido**: `id_produto` em joias, `id_pedido` em pedidos
-- [x] **Campos com repetição**: categoria, marca, nome, preço (joias); n_itens, id_produto[] (pedidos)
-- [x] **Registros de tamanho fixo**: `Produto` = 272 bytes fixos (garantido por `#pragma pack(1)` e arrays fixos)
+- [x] **Campos com repetição**: categoria, marca, nome, preço (joias); n_itens, ids_produtos[] (pedidos)
+- [x] **Registros de tamanho fixo**: `Produto` = 272 bytes, `Pedido` = 412 bytes (garantido por `#pragma pack(1)` e arrays fixos)
 - [x] **Arquivos binários**: todos os arquivos são `.dat` binários
 - [x] **Ordenação por campo chave**: `joias.dat` ordenado por `id_produto`, `pedidos.dat` por `id_pedido`
 - [x] **Método de ordenação explicado**: `qsort()` (Quicksort) no import inicial; merge streaming nas modificações

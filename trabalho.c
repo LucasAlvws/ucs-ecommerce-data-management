@@ -15,6 +15,7 @@
 #define MARCA_MAX 64
 #define NOME_MAX  128
 #define JOIAS_INDEX_STEP 256
+#define MAX_ITENS_PEDIDO 50
 
 #pragma pack(push, 1)
 typedef struct {
@@ -28,7 +29,8 @@ typedef struct {
 typedef struct {
     int64_t id_pedido;
     int32_t n_itens;
-} PedidoHdr;
+    int64_t ids_produtos[MAX_ITENS_PEDIDO];
+} Pedido;
 
 typedef struct {
     int64_t id_base;
@@ -174,15 +176,19 @@ static void write_pedidos_and_index(LinhaTmp* v, size_t n){
             if(v[j].quantidade>0) total += v[j].quantidade;
             j++;
         }
-        if(total > INT32_MAX) { fclose(f); fclose(idx); die("pedido com itens demais (n_itens>int32)"); }
+        if(total > MAX_ITENS_PEDIDO) { fprintf(stderr, "Pedido %lld tem %lld itens (max=%d). Truncando.\n", (long long)cur_ped, (long long)total, MAX_ITENS_PEDIDO); total = MAX_ITENS_PEDIDO; }
         long off = ftell(f);
-        PedidoHdr hdr; hdr.id_pedido=cur_ped; hdr.n_itens=(int32_t)total;
-        if(fwrite(&hdr, sizeof hdr, 1, f)!=1){ fclose(f); fclose(idx); die("w hdr"); }
-        for(size_t k=i; k<j; ++k){
-            for(int q=0; q<v[k].quantidade; ++q){
-                if(fwrite(&v[k].id_produto, sizeof(int64_t), 1, f)!=1){ fclose(f); fclose(idx); die("w item id"); }
+        Pedido ped;
+        memset(&ped, 0, sizeof(Pedido));
+        ped.id_pedido=cur_ped;
+        ped.n_itens=(int32_t)total;
+        int idx_item=0;
+        for(size_t k=i; k<j && idx_item<MAX_ITENS_PEDIDO; ++k){
+            for(int q=0; q<v[k].quantidade && idx_item<MAX_ITENS_PEDIDO; ++q){
+                ped.ids_produtos[idx_item++] = v[k].id_produto;
             }
         }
+        if(fwrite(&ped, sizeof ped, 1, f)!=1){ fclose(f); fclose(idx); die("w pedido"); }
         PedidosIdxEntry e; e.id_pedido = cur_ped; e.offset = (uint64_t)off;
         if(fwrite(&e, sizeof e, 1, idx)!=1) { fclose(f); fclose(idx); die("w idx"); }
         i = j;
@@ -211,11 +217,10 @@ static void rebuild_pedidos_idx(void){
     FILE* idx=fopen(PATH_PEDIDOS_IDX,"wb"); if(!idx) die("open pedidos.idx");
     while(1){
         long off=ftell(f);
-        PedidoHdr hdr; size_t rd=fread(&hdr, sizeof hdr, 1, f);
+        Pedido ped; size_t rd=fread(&ped, sizeof ped, 1, f);
         if(rd!=1) break;
-        PedidosIdxEntry e; e.id_pedido=hdr.id_pedido; e.offset=(uint64_t)off;
+        PedidosIdxEntry e; e.id_pedido=ped.id_pedido; e.offset=(uint64_t)off;
         if(fwrite(&e,sizeof e,1,idx)!=1) die("w pedidos.idx");
-        if(fseek(f, (long)(hdr.n_itens * (long)sizeof(int64_t)), SEEK_CUR)!=0) die("seek skip");
     }
     fclose(f); fclose(idx);
     printf("pedidos.idx: reconstruído.\n");
@@ -341,11 +346,10 @@ static void cmd_find_pedido(const char* s){
 
     FILE* f=fopen(PATH_PEDIDOS,"rb"); if(!f) die("open pedidos.dat");
     if(fseek(f,(long)off,SEEK_SET)!=0) die("seek ped");
-    PedidoHdr hdr; if(fread(&hdr,sizeof hdr,1,f)!=1){ fclose(f); die("read hdr"); }
-    printf("Pedido %lld — n_itens=%d\n", (long long)hdr.id_pedido, hdr.n_itens);
-    for(int32_t i=0;i<hdr.n_itens;i++){
-        int64_t idp; if(fread(&idp,sizeof idp,1,f)!=1){ fclose(f); die("read item id"); }
-        printf("  item%03d -> id_produto=%lld\n", i+1, (long long)idp);
+    Pedido ped; if(fread(&ped,sizeof ped,1,f)!=1){ fclose(f); die("read pedido"); }
+    printf("Pedido %lld — n_itens=%d\n", (long long)ped.id_pedido, ped.n_itens);
+    for(int32_t i=0;i<ped.n_itens;i++){
+        printf("  item%03d -> id_produto=%lld\n", i+1, (long long)ped.ids_produtos[i]);
     }
     fclose(f);
 }
@@ -367,10 +371,9 @@ static void cmd_list_pedidos_n(long n){
     FILE* f=fopen(PATH_PEDIDOS,"rb"); if(!f){ printf("Não foi possível abrir %s\n", PATH_PEDIDOS); return; }
     long printed=0;
     while(printed<n){
-        PedidoHdr hdr; size_t rd=fread(&hdr,sizeof hdr,1,f);
+        Pedido ped; size_t rd=fread(&ped,sizeof ped,1,f);
         if(rd!=1) break;
-        printf("%3ld) id_pedido=%lld  n_itens=%d\n", printed+1, (long long)hdr.id_pedido, hdr.n_itens);
-        if(fseek(f,(long)(hdr.n_itens * (long)sizeof(int64_t)), SEEK_CUR)!=0) die("seek skip");
+        printf("%3ld) id_pedido=%lld  n_itens=%d\n", printed+1, (long long)ped.id_pedido, ped.n_itens);
         printed++;
     }
     if(printed==0) printf("(arquivo vazio)\n");
@@ -500,38 +503,48 @@ static void cmd_add_pedido(const char* s_id_pedido, const char* s_n_itens, const
     
     int inserted = 0;
     if(!fin){
-        PedidoHdr hdr; hdr.id_pedido = id_pedido; hdr.n_itens = n_itens;
-        if(fwrite(&hdr, sizeof hdr, 1, fout)!=1){ free(ids_produtos); fclose(fout); die("w hdr"); }
-        if(fwrite(ids_produtos, sizeof(int64_t), n_itens, fout)!=(size_t)n_itens){ free(ids_produtos); fclose(fout); die("w ids"); }
+        Pedido novo;
+        memset(&novo, 0, sizeof(Pedido));
+        novo.id_pedido = id_pedido;
+        novo.n_itens = n_itens;
+        for(int32_t i=0; i<n_itens; i++){
+            novo.ids_produtos[i] = ids_produtos[i];
+        }
+        if(fwrite(&novo, sizeof novo, 1, fout)!=1){ free(ids_produtos); fclose(fout); die("w pedido"); }
         inserted = 1;
     } else {
-        PedidoHdr hdr;
-        while(fread(&hdr, sizeof hdr, 1, fin)==1){
-            if(hdr.id_pedido == id_pedido){
+        Pedido ped;
+        while(fread(&ped, sizeof ped, 1, fin)==1){
+            if(ped.id_pedido == id_pedido){
                 printf("Pedido %lld já existe. Use remove-pedido antes de adicionar novamente.\n", (long long)id_pedido);
                 fclose(fin); fclose(fout); remove("pedidos.tmp"); free(ids_produtos);
                 return;
             }
             
-            if(!inserted && id_pedido < hdr.id_pedido){
-                PedidoHdr novo; novo.id_pedido = id_pedido; novo.n_itens = n_itens;
-                if(fwrite(&novo, sizeof novo, 1, fout)!=1){ fclose(fin); fclose(fout); free(ids_produtos); die("w novo hdr"); }
-                if(fwrite(ids_produtos, sizeof(int64_t), n_itens, fout)!=(size_t)n_itens){ fclose(fin); fclose(fout); free(ids_produtos); die("w novo ids"); }
+            if(!inserted && id_pedido < ped.id_pedido){
+                Pedido novo;
+                memset(&novo, 0, sizeof(Pedido));
+                novo.id_pedido = id_pedido;
+                novo.n_itens = n_itens;
+                for(int32_t i=0; i<n_itens; i++){
+                    novo.ids_produtos[i] = ids_produtos[i];
+                }
+                if(fwrite(&novo, sizeof novo, 1, fout)!=1){ fclose(fin); fclose(fout); free(ids_produtos); die("w novo pedido"); }
                 inserted = 1;
             }
             
-            if(fwrite(&hdr, sizeof hdr, 1, fout)!=1){ fclose(fin); fclose(fout); free(ids_produtos); die("w hdr copy"); }
-            for(int32_t i=0; i<hdr.n_itens; i++){
-                int64_t id; 
-                if(fread(&id, sizeof id, 1, fin)!=1){ fclose(fin); fclose(fout); free(ids_produtos); die("read id"); }
-                if(fwrite(&id, sizeof id, 1, fout)!=1){ fclose(fin); fclose(fout); free(ids_produtos); die("w id"); }
-            }
+            if(fwrite(&ped, sizeof ped, 1, fout)!=1){ fclose(fin); fclose(fout); free(ids_produtos); die("w pedido copy"); }
         }
         
         if(!inserted){
-            PedidoHdr novo; novo.id_pedido = id_pedido; novo.n_itens = n_itens;
-            if(fwrite(&novo, sizeof novo, 1, fout)!=1){ fclose(fout); free(ids_produtos); die("w novo hdr fim"); }
-            if(fwrite(ids_produtos, sizeof(int64_t), n_itens, fout)!=(size_t)n_itens){ fclose(fout); free(ids_produtos); die("w novo ids fim"); }
+            Pedido novo;
+            memset(&novo, 0, sizeof(Pedido));
+            novo.id_pedido = id_pedido;
+            novo.n_itens = n_itens;
+            for(int32_t i=0; i<n_itens; i++){
+                novo.ids_produtos[i] = ids_produtos[i];
+            }
+            if(fwrite(&novo, sizeof novo, 1, fout)!=1){ fclose(fout); free(ids_produtos); die("w novo pedido fim"); }
         }
         fclose(fin);
     }
@@ -555,21 +568,15 @@ static void cmd_remove_pedido(const char* s_id){
     FILE* fout = fopen("pedidos.tmp", "wb");
     if(!fout){ fclose(fin); die("pedidos.tmp"); }
     
-    PedidoHdr hdr;
+    Pedido ped;
     int found = 0;
-    while(fread(&hdr, sizeof hdr, 1, fin)==1){
-        if(hdr.id_pedido == id_pedido){
+    while(fread(&ped, sizeof ped, 1, fin)==1){
+        if(ped.id_pedido == id_pedido){
             found = 1;
-            if(fseek(fin, (long)(hdr.n_itens * sizeof(int64_t)), SEEK_CUR)!=0){ fclose(fin); fclose(fout); die("seek skip"); }
             continue;
         }
         
-        if(fwrite(&hdr, sizeof hdr, 1, fout)!=1){ fclose(fin); fclose(fout); die("w hdr"); }
-        for(int32_t i=0; i<hdr.n_itens; i++){
-            int64_t id;
-            if(fread(&id, sizeof id, 1, fin)!=1){ fclose(fin); fclose(fout); die("read id"); }
-            if(fwrite(&id, sizeof id, 1, fout)!=1){ fclose(fin); fclose(fout); die("w id"); }
-        }
+        if(fwrite(&ped, sizeof ped, 1, fout)!=1){ fclose(fin); fclose(fout); die("w pedido"); }
     }
     fclose(fin);
     fclose(fout);
@@ -619,12 +626,11 @@ static void q_vendas_por_nome(const char* nome){
     if(!fp){ printf("Precisa do pedidos.dat (rode import).\n"); return; }
     
     long long count=0;
-    PedidoHdr hdr;
+    Pedido ped;
     
-    while(fread(&hdr,sizeof hdr,1,fp)==1){
-        for(int32_t i=0;i<hdr.n_itens;i++){
-            int64_t idv; 
-            if(fread(&idv,sizeof idv,1,fp)!=1){ fclose(fp); die("read id"); }
+    while(fread(&ped,sizeof ped,1,fp)==1){
+        for(int32_t i=0;i<ped.n_itens;i++){
+            int64_t idv = ped.ids_produtos[i];
             
             FILE* fj=fopen(PATH_JOIAS,"rb"); 
             if(!fj){ fclose(fp); die("open joias"); }
@@ -661,12 +667,11 @@ static void q_vendas_por_categoria(const char* categoria){
     if(!fp){ printf("Precisa do pedidos.dat (rode import).\n"); return; }
     
     long long count=0;
-    PedidoHdr hdr;
+    Pedido ped;
     
-    while(fread(&hdr,sizeof hdr,1,fp)==1){
-        for(int32_t i=0;i<hdr.n_itens;i++){
-            int64_t idv; 
-            if(fread(&idv,sizeof idv,1,fp)!=1){ fclose(fp); die("read id"); }
+    while(fread(&ped,sizeof ped,1,fp)==1){
+        for(int32_t i=0;i<ped.n_itens;i++){
+            int64_t idv = ped.ids_produtos[i];
             
             FILE* fj=fopen(PATH_JOIAS,"rb"); 
             if(!fj){ fclose(fp); die("open joias"); }
