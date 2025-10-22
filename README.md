@@ -60,7 +60,7 @@ Para este arquivo foi construído um índice denominado `pedidos.idx`, contendo 
 
 ### 2.1. Índice de Produtos (`joias.idx`)
 
-O arquivo `joias.idx` implementa um índice parcial (esparso) para o arquivo de produtos. A estrutura de cada entrada do índice é:
+O arquivo `joias.idx` implementa um índice parcial para o arquivo de produtos. A estrutura de cada entrada do índice é:
 
 ```c
 typedef struct {
@@ -92,7 +92,7 @@ Cada entrada contém:
 - `id_pedido` (int64_t): Identificador único do pedido. Ocupa 8 bytes.
 - `offset` (uint64_t): Posição em bytes onde o registro do pedido inicia no arquivo `pedidos.dat`. Ocupa 8 bytes.
 
-O índice denso mantém uma entrada para cada pedido existente no arquivo de dados. Esta abordagem permite acesso direto aos registros através de busca binária no índice, sem necessidade de varredura adicional no arquivo de dados.
+O índice completo mantém uma entrada para cada pedido existente no arquivo de dados. Esta abordagem permite acesso direto aos registros através de busca binária no índice, sem necessidade de varredura adicional no arquivo de dados.
 
 ## 3. Métodos de Ordenação Implementados
 
@@ -117,7 +117,7 @@ A remoção é realizada copiando todos os registros exceto o que possui o `id_p
 
 **Inserção e Remoção de Pedidos**
 
-As operações sobre o arquivo `pedidos.dat` seguem a mesma estratégia de merge ordenado, mantendo a ordenação por `id_pedido`. Após cada operação, o índice denso `pedidos.idx` é completamente reconstruído através da função `rebuild_pedidos_idx()`.
+As operações sobre o arquivo `pedidos.dat` seguem a mesma estratégia de merge ordenado, mantendo a ordenação por `id_pedido`. Após cada operação, o índice completo `pedidos.idx` é completamente reconstruído através da função `rebuild_pedidos_idx()`.
 
 ## 4. Consultas Implementadas
 
@@ -155,7 +155,7 @@ O sistema oferece as seguintes operações através de um menu interativo:
 
 **Busca de Produto**: Localiza um produto pelo seu `id_produto` utilizando busca binária no índice parcial `joias.idx`, seguida de varredura linear limitada (máximo 256 registros) no arquivo `joias.dat`. Utiliza a função `fseek()` para acesso direto ao offset indicado pelo índice.
 
-**Busca de Pedido**: Localiza um pedido pelo seu `id_pedido` através de busca binária no índice denso `pedidos.idx`, com acesso direto via `fseek()` ao registro no arquivo `pedidos.dat`.
+**Busca de Pedido**: Localiza um pedido pelo seu `id_pedido` através de busca binária no índice completo `pedidos.idx`, com acesso direto via `fseek()` ao registro no arquivo `pedidos.dat`.
 
 ### 5.2. Operações de Modificação
 
