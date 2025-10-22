@@ -53,3 +53,13 @@ dkms.conf
 
 # debug information files
 *.dwo
+
+
+*teste-v/*
+
+# joias.dat
+# joias.idx
+# pedidos.dat
+# pedidos.idx
+trabalho
+dump/*
