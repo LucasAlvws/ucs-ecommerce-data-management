@@ -185,6 +185,5 @@ O campo `nome` do produto é composto pela concatenação de categoria (sem pref
 O sistema pode ser compilado e executado através dos seguintes comandos:
 
 ```bash
-make clean
 make
 ```
