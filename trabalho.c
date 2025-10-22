@@ -17,7 +17,6 @@
 #define JOIAS_INDEX_STEP 256
 #define MAX_ITENS_PEDIDO 50
 
-#pragma pack(push, 1)
 typedef struct {
     int64_t id_produto;
     char categoria[CAT_MAX];
@@ -41,7 +40,6 @@ typedef struct {
     int64_t id_pedido;
     uint64_t offset;
 } PedidosIdxEntry;
-#pragma pack(pop)
 
 static void die(const char* m){ perror(m); exit(1); }
 static size_t fsize(FILE* f){
@@ -93,9 +91,6 @@ static int try_i32(const char* s, int32_t* out){
 static int try_f64(const char* s, double* out){
     if(!s||!*s){ return 0; } char*e=0; errno=0; double v=strtod(s,&e);
     if(errno||e==s){ return 0; } *out=v; return 1;
-}
-static void strtolower_inplace(char* s){
-    for(; *s; ++s) *s=(char)tolower((unsigned char)*s);
 }
 static void safe_copy(char* dst, size_t cap, const char* src){
     if(!src) src="";
@@ -380,12 +375,26 @@ static void cmd_list_pedidos_n(long n){
     fclose(f);
 }
 
-static void cmd_add_produto(const char* s_id, const char* s_cat, const char* s_marca, const char* s_nome, const char* s_preco){
-    int64_t id_produto; double preco;
-    if(!try_i64(s_id,&id_produto) || !try_f64(s_preco,&preco)){
-        fprintf(stderr,"id_produto ou preco inválidos.\n"); return;
+static void cmd_add_produto(const char* s_cat, const char* s_marca, const char* s_nome, const char* s_preco){
+    double preco;
+    if(!try_f64(s_preco,&preco)){
+        fprintf(stderr,"preco inválido.\n"); return;
     }
     if(!s_cat||!s_nome){ fprintf(stderr,"categoria e nome são obrigatórios.\n"); return; }
+    
+    int64_t id_produto = 1;
+    FILE* fin = fopen(PATH_JOIAS, "rb");
+    
+    if(fin){
+        Produto p;
+        while(fread(&p, sizeof p, 1, fin)==1){
+            if(p.id_produto >= id_produto){
+                id_produto = p.id_produto + 1;
+            }
+        }
+        fclose(fin);
+        fin = fopen(PATH_JOIAS, "rb");
+    }
     
     Produto novo;
     memset(&novo, 0, sizeof(Produto));
@@ -395,7 +404,6 @@ static void cmd_add_produto(const char* s_id, const char* s_cat, const char* s_m
     safe_copy(novo.nome, NOME_MAX, s_nome);
     novo.preco = preco;
     
-    FILE* fin = fopen(PATH_JOIAS, "rb");
     FILE* fout = fopen("joias.tmp", "wb");
     if(!fout) die("joias.tmp");
     
@@ -406,11 +414,6 @@ static void cmd_add_produto(const char* s_id, const char* s_cat, const char* s_m
     } else {
         Produto p;
         while(fread(&p, sizeof p, 1, fin)==1){
-            if(p.id_produto == id_produto){
-                printf("Produto %lld já existe. Use remove-produto antes de adicionar novamente.\n", (long long)id_produto);
-                fclose(fin); fclose(fout); remove("joias.tmp");
-                return;
-            }
             if(!inserted && id_produto < p.id_produto){
                 if(fwrite(&novo, sizeof(Produto), 1, fout)!=1){ fclose(fin); fclose(fout); die("w novo"); }
                 inserted = 1;
@@ -466,10 +469,22 @@ static void cmd_remove_produto(const char* s_id){
     printf("Produto %lld removido com sucesso.\n", (long long)id_produto);
 }
 
-static void cmd_add_pedido(const char* s_id_pedido, const char* s_n_itens, const char* s_ids_produtos){
-    int64_t id_pedido; int32_t n_itens;
-    if(!try_i64(s_id_pedido,&id_pedido) || !try_i32(s_n_itens,&n_itens) || n_itens<=0){
-        fprintf(stderr,"id_pedido ou n_itens inválidos.\n"); return;
+static void cmd_add_pedido(const char* s_n_itens, const char* s_ids_produtos){
+    int32_t n_itens;
+    if(!try_i32(s_n_itens,&n_itens) || n_itens<=0){
+        fprintf(stderr,"n_itens inválido.\n"); return;
+    }
+    
+    int64_t id_pedido = 1;
+    FILE* ftmp = fopen(PATH_PEDIDOS, "rb");
+    if(ftmp){
+        Pedido p;
+        while(fread(&p, sizeof p, 1, ftmp)==1){
+            if(p.id_pedido >= id_pedido){
+                id_pedido = p.id_pedido + 1;
+            }
+        }
+        fclose(ftmp);
     }
     
     int64_t* ids_produtos = (int64_t*)malloc((size_t)n_itens * sizeof(int64_t));
@@ -751,16 +766,15 @@ static void menu_loop(void){
             cmd_find_pedido(id);
             press_enter();
         } else if(opt == 4){
-            char id[64], cat[128], marca[128], nome[256], preco[64];
-            read_line("id_produto: ", id, sizeof(id));
+            char cat[128], marca[128], nome[256], preco[64];
             read_line("categoria: ", cat, sizeof(cat));
             read_line("marca: ", marca, sizeof(marca));
             read_line("nome: ", nome, sizeof(nome));
             read_line("preco: ", preco, sizeof(preco));
-            if(id[0]=='\0' || cat[0]=='\0' || nome[0]=='\0' || preco[0]=='\0'){
-                printf("Argumentos invalidos (id, categoria, nome e preco sao obrigatorios).\n"); press_enter(); continue;
+            if(cat[0]=='\0' || nome[0]=='\0' || preco[0]=='\0'){
+                printf("Argumentos invalidos (categoria, nome e preco sao obrigatorios).\n"); press_enter(); continue;
             }
-            cmd_add_produto(id, cat, marca, nome, preco);
+            cmd_add_produto(cat, marca, nome, preco);
             press_enter();
         } else if(opt == 5){
             char id[64];
@@ -769,14 +783,13 @@ static void menu_loop(void){
             cmd_remove_produto(id);
             press_enter();
         } else if(opt == 6){
-            char id_ped[64], n_itens[32], ids_produtos[512];
-            read_line("id_pedido: ", id_ped, sizeof(id_ped));
+            char n_itens[32], ids_produtos[512];
             read_line("numero de itens: ", n_itens, sizeof(n_itens));
             read_line("IDs dos produtos (separados por virgula): ", ids_produtos, sizeof(ids_produtos));
-            if(id_ped[0]=='\0' || n_itens[0]=='\0' || ids_produtos[0]=='\0'){
+            if(n_itens[0]=='\0' || ids_produtos[0]=='\0'){
                 printf("Argumentos invalidos.\n"); press_enter(); continue;
             }
-            cmd_add_pedido(id_ped, n_itens, ids_produtos);
+            cmd_add_pedido(n_itens, ids_produtos);
             press_enter();
         } else if(opt == 7){
             char id[64];

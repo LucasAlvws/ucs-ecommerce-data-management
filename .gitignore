@@ -57,9 +57,9 @@ dkms.conf
 
 *teste-v/*
 
-joias.dat
-joias.idx
-pedidos.dat
-pedidos.idx
+# joias.dat
+# joias.idx
+# pedidos.dat
+# pedidos.idx
 trabalho
 dump/*
