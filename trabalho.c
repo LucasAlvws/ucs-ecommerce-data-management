@@ -634,6 +634,73 @@ static int equals_ignore_case(const char* a, const char* b){
     return *a=='\0' && *b=='\0';
 }
 
+static int buscar_produto_por_id(int64_t id_produto, Produto* resultado) {
+    FILE* fidx = fopen(PATH_JOIAS_IDX, "rb");
+    FILE* fdat = fopen(PATH_JOIAS, "rb");
+    if (!fidx || !fdat) {
+        if (fidx) fclose(fidx);
+        if (fdat) fclose(fdat);
+        return 0;
+    }
+    
+    size_t n = fsize(fidx) / sizeof(JoiasIdxEntry);
+    if (n == 0) {
+        fclose(fidx);
+        fclose(fdat);
+        return 0;
+    }
+    
+    size_t lo = 0, hi = n;
+    while (lo < hi) {
+        size_t mid = (lo + hi) / 2;
+        JoiasIdxEntry entry;
+        if (fseek(fidx, (long)(mid * sizeof(JoiasIdxEntry)), SEEK_SET) != 0) {
+            fclose(fidx); fclose(fdat);
+            return 0;
+        }
+        if (fread(&entry, sizeof(JoiasIdxEntry), 1, fidx) != 1) {
+            fclose(fidx); fclose(fdat);
+            return 0;
+        }
+        if (entry.id_base <= id_produto)
+            lo = mid + 1;
+        else
+            hi = mid;
+    }
+    size_t base = (lo == 0 ? 0 : lo - 1);
+    
+    JoiasIdxEntry entry;
+    if (fseek(fidx, (long)(base * sizeof(JoiasIdxEntry)), SEEK_SET) != 0) {
+        fclose(fidx); fclose(fdat);
+        return 0;
+    }
+    if (fread(&entry, sizeof(JoiasIdxEntry), 1, fidx) != 1) {
+        fclose(fidx); fclose(fdat);
+        return 0;
+    }
+    
+    if (fseek(fdat, (long)entry.offset, SEEK_SET) != 0) {
+        fclose(fidx); fclose(fdat);
+        return 0;
+    }
+    
+    Produto p;
+    size_t cnt = 0;
+    while (cnt < JOIAS_INDEX_STEP && fread(&p, sizeof p, 1, fdat) == 1) {
+        if (p.id_produto == id_produto) {
+            *resultado = p;
+            fclose(fidx);
+            fclose(fdat);
+            return 1;
+        }
+        cnt++;
+    }
+    
+    fclose(fidx);
+    fclose(fdat);
+    return 0;
+}
+
 static void q_vendas_por_nome(const char* nome){
     if(!nome||!*nome){ printf("Forneça um nome.\n"); return; }
     
@@ -645,24 +712,19 @@ static void q_vendas_por_nome(const char* nome){
     
     while(fread(&ped,sizeof ped,1,fp)==1){
         for(int32_t i=0;i<ped.n_itens;i++){
-            int64_t idv = ped.ids_produtos[i];
-            
-            FILE* fj=fopen(PATH_JOIAS,"rb"); 
-            if(!fj){ fclose(fp); die("open joias"); }
-            
             Produto p;
-            while(fread(&p,sizeof p,1,fj)==1){
-                if(p.id_produto==idv && equals_ignore_case(p.nome,nome)){
+            
+            if(buscar_produto_por_id(ped.ids_produtos[i], &p)){
+                if(equals_ignore_case(p.nome,nome)){
                     count++;
-                    break;
                 }
             }
-            fclose(fj);
         }
     }
     fclose(fp);
     printf("Vendas (itens) do nome \"%s\": %lld\n", nome, count);
 }
+
 
 static int has_category(const char* cat_full, const char* want_clean){
     const char* base = (strncmp(cat_full,"jewelry.",8)==0? cat_full+8 : cat_full);
@@ -686,19 +748,13 @@ static void q_vendas_por_categoria(const char* categoria){
     
     while(fread(&ped,sizeof ped,1,fp)==1){
         for(int32_t i=0;i<ped.n_itens;i++){
-            int64_t idv = ped.ids_produtos[i];
-            
-            FILE* fj=fopen(PATH_JOIAS,"rb"); 
-            if(!fj){ fclose(fp); die("open joias"); }
-            
             Produto p;
-            while(fread(&p,sizeof p,1,fj)==1){
-                if(p.id_produto==idv && has_category(p.categoria, categoria)){
+            
+            if(buscar_produto_por_id(ped.ids_produtos[i], &p)){
+                if(has_category(p.categoria, categoria)){
                     count++;
-                    break;
                 }
             }
-            fclose(fj);
         }
     }
     fclose(fp);
