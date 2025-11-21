@@ -69,10 +69,13 @@ typedef struct {
 
 // ========================================================================
 // TRABALHO II - ESTRUTURAS DA TABELA HASH
+// Índice sobre coluna SECUNDÁRIA (não-ordenada): primeiro produto do pedido
+// Permite buscar: "Quais pedidos contêm o produto X?"
 // ========================================================================
 typedef struct HashNode {
-    int64_t id_pedido;
-    uint64_t offset;
+    int64_t id_produto;     // Chave: primeiro produto do pedido (coluna secundária)
+    int64_t id_pedido;      // Valor: ID do pedido que contém esse produto
+    uint64_t offset;        // Offset do pedido no arquivo
     struct HashNode* next;
 } HashNode;
 
@@ -1123,10 +1126,12 @@ static HashTable* hash_create(void) {
     return ht;
 }
 
-static void hash_insert(HashTable* ht, int64_t id_pedido, uint64_t offset) {
-    unsigned int index = hash_function(id_pedido);
+// TRABALHO II: Inserir na hash indexando por id_produto (coluna secundária)
+static void hash_insert(HashTable* ht, int64_t id_produto, int64_t id_pedido, uint64_t offset) {
+    unsigned int index = hash_function(id_produto);
     HashNode* new_node = (HashNode*)malloc(sizeof(HashNode));
     if (!new_node) die("malloc hashnode");
+    new_node->id_produto = id_produto;
     new_node->id_pedido = id_pedido;
     new_node->offset = offset;
     new_node->next = NULL;
@@ -1139,12 +1144,14 @@ static void hash_insert(HashTable* ht, int64_t id_pedido, uint64_t offset) {
     ht->total_entries++;
 }
 
-static int hash_search(HashTable* ht, int64_t id_pedido, uint64_t* offset) {
-    unsigned int index = hash_function(id_pedido);
+// TRABALHO II: Buscar pedidos que contêm um determinado produto
+static int hash_search(HashTable* ht, int64_t id_produto, int64_t* id_pedido, uint64_t* offset) {
+    unsigned int index = hash_function(id_produto);
     HashNode* node = ht->buckets[index];
     
     while (node != NULL) {
-        if (node->id_pedido == id_pedido) {
+        if (node->id_produto == id_produto) {
+            *id_pedido = node->id_pedido;
             *offset = node->offset;
             return 1;
         }
@@ -1167,6 +1174,8 @@ static void hash_free(HashTable* ht) {
     free(ht);
 }
 
+// TRABALHO II: Construir hash indexando pelo PRIMEIRO PRODUTO de cada pedido
+// Isso permite buscar "quais pedidos contêm o produto X?"
 static void hash_build_from_file(void) {
     clock_t start = clock();
     
@@ -1185,11 +1194,17 @@ static void hash_build_from_file(void) {
     Pedido p;
     uint64_t offset = 0;
     int count = 0;
+    int pedidos_vazios = 0;
     
     while (fread(&p, sizeof(Pedido), 1, f) == 1) {
-        hash_insert(g_pedidos_hash, p.id_pedido, offset);
+        // Indexar pelo primeiro produto do pedido (coluna secundária)
+        if (p.n_itens > 0) {
+            hash_insert(g_pedidos_hash, p.ids_produtos[0], p.id_pedido, offset);
+            count++;
+        } else {
+            pedidos_vazios++;
+        }
         offset += sizeof(Pedido);
-        count++;
     }
     
     fclose(f);
@@ -1199,8 +1214,12 @@ static void hash_build_from_file(void) {
     
     printf("\n========== TABELA HASH - INDICE EM MEMORIA ==========\n");
     printf("Arquivo: %s\n", PATH_PEDIDOS);
+    printf("Coluna indexada: PRIMEIRO PRODUTO do pedido (secundaria)\n");
     printf("Tamanho da tabela: %d\n", HASH_TABLE_SIZE);
     printf("Pedidos indexados: %d\n", count);
+    if (pedidos_vazios > 0) {
+        printf("Pedidos vazios (ignorados): %d\n", pedidos_vazios);
+    }
     printf("Total de entradas: %d\n", g_pedidos_hash->total_entries);
     printf("Colisoes: %d\n", g_pedidos_hash->collisions);
     printf("Fator de carga: %.2f%%\n", (g_pedidos_hash->total_entries * 100.0) / g_pedidos_hash->size);
@@ -1208,22 +1227,24 @@ static void hash_build_from_file(void) {
     printf("=====================================================\n");
 }
 
+// TRABALHO II: Buscar pedidos que contêm um determinado PRODUTO
 static void hash_buscar_pedido(const char* id_str) {
     if (!g_pedidos_hash) {
         printf("Erro: Indice da tabela hash nao foi criado. Use a opcao 17 primeiro.\n");
         return;
     }
     
-    int64_t id = 0;
-    if (!try_i64(id_str, &id)) {
-        printf("ID invalido.\n");
+    int64_t id_produto = 0;
+    if (!try_i64(id_str, &id_produto)) {
+        printf("ID de produto invalido.\n");
         return;
     }
     
     clock_t start = clock();
     
+    int64_t id_pedido;
     uint64_t offset;
-    if (hash_search(g_pedidos_hash, id, &offset)) {
+    if (hash_search(g_pedidos_hash, id_produto, &id_pedido, &offset)) {
         FILE* f = fopen(PATH_PEDIDOS, "rb");
         if (!f) {
             printf("Erro ao abrir arquivo de pedidos.\n");
@@ -1241,8 +1262,9 @@ static void hash_buscar_pedido(const char* id_str) {
             clock_t end = clock();
             double time_spent = (double)(end - start) / CLOCKS_PER_SEC;
             
-            printf("\n--- Pedido encontrado (Tabela Hash) ---\n");
-            printf("ID: %lld\n", (long long)p.id_pedido);
+            printf("\n--- Pedido encontrado (Tabela Hash - busca por produto) ---\n");
+            printf("Produto buscado: %lld\n", (long long)id_produto);
+            printf("Pedido ID: %lld\n", (long long)p.id_pedido);
             printf("Numero de itens: %d\n", p.n_itens);
             printf("IDs dos produtos: ");
             for (int32_t i = 0; i < p.n_itens && i < 10; i++) {
@@ -1258,7 +1280,7 @@ static void hash_buscar_pedido(const char* id_str) {
     } else {
         clock_t end = clock();
         double time_spent = (double)(end - start) / CLOCKS_PER_SEC;
-        printf("Pedido ID %lld nao encontrado.\n", (long long)id);
+        printf("Nenhum pedido encontrado contendo o produto ID %lld.\n", (long long)id_produto);
         printf("Tempo de busca: %.6f segundos\n", time_spent);
     }
 }
@@ -1375,15 +1397,18 @@ static void hash_inserir_pedido_incremental(void) {
     }
     fclose(f);
     
-    // Inserir na Tabela Hash
-    hash_insert(g_pedidos_hash, ped.id_pedido, offset);
+    // Inserir na Tabela Hash (indexando pelo primeiro produto)
+    if (n > 0) {
+        hash_insert(g_pedidos_hash, ped.ids_produtos[0], ped.id_pedido, offset);
+    }
     
     clock_t end = clock();
     double time_spent = (double)(end - start) / CLOCKS_PER_SEC;
     
     printf("\n=====================================================\n");
     printf("Pedido adicionado com sucesso!\n");
-    printf("ID gerado: %lld\n", (long long)ped.id_pedido);
+    printf("ID do pedido gerado: %lld\n", (long long)ped.id_pedido);
+    printf("Primeiro produto: %lld\n", (long long)ped.ids_produtos[0]);
     printf("Offset no arquivo: %llu\n", (unsigned long long)offset);
     printf("Tempo de insercao (arquivo + Hash): %.6f segundos\n", time_spent);
     printf("Total de pedidos na Hash: %d\n", g_pedidos_hash->total_entries);
@@ -1394,13 +1419,14 @@ static void hash_inserir_pedido_incremental(void) {
     construir_indice_exaustivo();
 }
 
-static int hash_remove(HashTable* ht, int64_t id_pedido) {
-    unsigned int index = hash_function(id_pedido);
+// TRABALHO II: Remover entrada da hash por id_produto
+static int hash_remove(HashTable* ht, int64_t id_produto) {
+    unsigned int index = hash_function(id_produto);
     HashNode* node = ht->buckets[index];
     HashNode* prev = NULL;
     
     while (node != NULL) {
-        if (node->id_pedido == id_pedido) {
+        if (node->id_produto == id_produto) {
             if (prev == NULL) {
                 ht->buckets[index] = node->next;
             } else {
@@ -1418,33 +1444,34 @@ static int hash_remove(HashTable* ht, int64_t id_pedido) {
 
 static void hash_remover_pedido_incremental(void) {
     if (!g_pedidos_hash) {
-        printf("Erro: Tabela Hash nao foi criada. Use a opcao 15 primeiro.\n");
+        printf("Erro: Tabela Hash nao foi criada. Use a opcao 17 primeiro.\n");
         return;
     }
     
     char id[64];
-    read_line("id_pedido: ", id, sizeof(id));
+    read_line("id_produto (para remover da hash): ", id, sizeof(id));
     if(id[0]=='\0'){ printf("Valor invalido.\n"); return; }
-    int64_t id_pedido = atoll(id);
+    int64_t id_produto = atoll(id);
     
     clock_t start = clock();
     
     // Remover da Tabela Hash
-    int found = hash_remove(g_pedidos_hash, id_pedido);
+    int found = hash_remove(g_pedidos_hash, id_produto);
     
     clock_t end = clock();
     double time_spent = (double)(end - start) / CLOCKS_PER_SEC;
     
     if (found) {
         printf("\n=====================================================\n");
-        printf("Pedido ID %lld removido da Tabela Hash!\n", (long long)id_pedido);
+        printf("Entrada removida da Tabela Hash!\n");
+        printf("Produto ID: %lld\n", (long long)id_produto);
         printf("Tempo de remocao: %.6f segundos\n", time_spent);
-        printf("Total de pedidos na Hash: %d\n", g_pedidos_hash->total_entries);
+        printf("Total de entradas na Hash: %d\n", g_pedidos_hash->total_entries);
         printf("=====================================================\n");
-        printf("\nAVISO: O pedido ainda existe no arquivo pedidos.dat\n");
-        printf("Use a opcao 7 para remover do arquivo tambem.\n");
+        printf("\nNOTA: Apenas a entrada do indice foi removida.\n");
+        printf("O pedido ainda existe no arquivo pedidos.dat\n");
     } else {
-        printf("Pedido ID %lld nao encontrado na Tabela Hash.\n", (long long)id_pedido);
+        printf("Produto ID %lld nao encontrado na Tabela Hash.\n", (long long)id_produto);
         printf("Tempo de busca: %.6f segundos\n", time_spent);
     }
 }
@@ -1474,10 +1501,10 @@ static void menu_loop(void){
         printf("14) Buscar produto com Arvore B\n");
         printf("15) Inserir produto (Arvore B incremental)\n");
         printf("16) Remover produto (Arvore B incremental)\n");
-        printf("17) Criar indice Tabela Hash (pedidos)\n");
-        printf("18) Buscar pedido com Tabela Hash\n");
+        printf("17) Criar indice Hash (1o produto pedido)\n");
+        printf("18) Buscar pedido por produto (Hash)\n");
         printf("19) Inserir pedido (Hash incremental)\n");
-        printf("20) Remover pedido (Hash incremental)\n");
+        printf("20) Remover produto da Hash\n");
         printf("=====================================\n");
         printf("21) Sair\n");
         printf("=====================================\n");
@@ -1584,7 +1611,7 @@ static void menu_loop(void){
             press_enter();
         } else if(opt == 18){
             char id[64];
-            read_line("id_pedido: ", id, sizeof(id));
+            read_line("id_produto (para buscar pedidos): ", id, sizeof(id));
             if(id[0]=='\0'){ printf("Valor invalido.\n"); press_enter(); continue; }
             hash_buscar_pedido(id);
             press_enter();
