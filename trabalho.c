@@ -70,7 +70,6 @@ typedef struct {
 // ========================================================================
 // TRABALHO II - ESTRUTURAS DA TABELA HASH
 // Índice sobre coluna SECUNDÁRIA (não-ordenada): primeiro produto do pedido
-// Permite buscar: "Quais pedidos contêm o produto X?"
 // ========================================================================
 typedef struct HashNode {
     int64_t id_produto;     // Chave: primeiro produto do pedido (coluna secundária)
@@ -87,6 +86,27 @@ typedef struct {
 } HashTable;
 
 static void die(const char* m){ perror(m); exit(1); }
+
+// TRABALHO II: Deleção lógica na Árvore B (lista de IDs removidos)
+static int64_t* g_btree_deleted_ids = NULL;
+static size_t g_btree_deleted_len = 0, g_btree_deleted_cap = 0;
+static void btree_deleted_clear(void){
+    free(g_btree_deleted_ids); g_btree_deleted_ids=NULL; g_btree_deleted_len=0; g_btree_deleted_cap=0;
+}
+static int btree_deleted_contains(int64_t id){
+    for(size_t i=0;i<g_btree_deleted_len;i++) if(g_btree_deleted_ids[i]==id) return 1;
+    return 0;
+}
+static void btree_deleted_add(int64_t id){
+    if(btree_deleted_contains(id)) return;
+    if(g_btree_deleted_len==g_btree_deleted_cap){
+        size_t nc = g_btree_deleted_cap? g_btree_deleted_cap*2 : 64;
+        int64_t* nv = (int64_t*)realloc(g_btree_deleted_ids, nc*sizeof(int64_t));
+        if(!nv) die("realloc btree_deleted");
+        g_btree_deleted_ids = nv; g_btree_deleted_cap = nc;
+    }
+    g_btree_deleted_ids[g_btree_deleted_len++] = id;
+}
 
 // Gerar ID único baseado em timestamp
 static int64_t gerar_id(void) {
@@ -859,7 +879,7 @@ static void read_line(const char *prompt, char *buf, size_t n){
 }
 static void press_enter(void){
     printf("\n(Pressione ENTER para continuar) "); fflush(stdout);
-    int c; while((c=getchar())!='\n' && c!=EOF);
+    getchar();
 }
 
 // ========== FUNCOES DA ARVORE B ==========
@@ -1027,6 +1047,8 @@ static void btree_build_from_file(void) {
     if (g_produtos_btree) {
         btree_free(g_produtos_btree);
     }
+    // TRABALHO II: Limpar lista de removidos ao reconstruir
+    btree_deleted_clear();
     
     g_produtos_btree = btree_create();
     
@@ -1072,7 +1094,7 @@ static void btree_buscar_produto(const char* id_str) {
     clock_t start = clock();
     
     uint64_t offset;
-    if (btree_search(g_produtos_btree->root, id, &offset)) {
+    if (btree_search(g_produtos_btree->root, id, &offset) && !btree_deleted_contains(id)) {
         FILE* f = fopen(PATH_JOIAS, "rb");
         if (!f) {
             printf("Erro ao abrir arquivo de produtos.\n");
@@ -1104,7 +1126,11 @@ static void btree_buscar_produto(const char* id_str) {
     } else {
         clock_t end = clock();
         double time_spent = (double)(end - start) / CLOCKS_PER_SEC;
-        printf("Produto ID %lld nao encontrado.\n", (long long)id);
+        if (btree_deleted_contains(id)) {
+            printf("Produto ID %lld foi removido do indice em memoria.\n", (long long)id);
+        } else {
+            printf("Produto ID %lld nao encontrado.\n", (long long)id);
+        }
         printf("Tempo de busca: %.6f segundos\n", time_spent);
     }
 }
@@ -1352,8 +1378,49 @@ static void btree_remover_produto_incremental(void) {
         return;
     }
     
-    printf("AVISO: Remocao incremental na Arvore B nao foi implementada.\n");
-    printf("Use a opcao 5 (remover do arquivo) + opcao 13 (recriar indice).\n");
+    char id_str[64];
+    read_line("id_produto: ", id_str, sizeof(id_str));
+    if(id_str[0]=='\0'){ printf("Valor invalido.\n"); return; }
+    
+    int64_t id_produto;
+    if(!try_i64(id_str, &id_produto)){ printf("ID invalido.\n"); return; }
+    
+    clock_t start = clock();
+    
+    // Verificar se o produto existe na árvore B
+    uint64_t offset;
+    if (!btree_search(g_produtos_btree->root, id_produto, &offset)) {
+        clock_t end = clock();
+        double time_spent = (double)(end - start) / CLOCKS_PER_SEC;
+        printf("Produto ID %lld nao encontrado na Arvore B.\n", (long long)id_produto);
+        printf("Tempo de busca: %.6f segundos\n", time_spent);
+        return;
+    }
+    
+    // TRABALHO II: Remoção incremental via deleção lógica
+    // Adicionar ID à lista de produtos removidos
+    if (btree_deleted_contains(id_produto)) {
+        clock_t end = clock();
+        double time_spent = (double)(end - start) / CLOCKS_PER_SEC;
+        printf("Produto ID %lld ja foi removido anteriormente.\n", (long long)id_produto);
+        printf("Tempo de verificacao: %.6f segundos\n", time_spent);
+        return;
+    }
+    
+    btree_deleted_add(id_produto);
+    g_produtos_btree->total_keys--; // Decrementar contador lógico
+    
+    clock_t end = clock();
+    double time_spent = (double)(end - start) / CLOCKS_PER_SEC;
+    
+    printf("\n==================================================\n");
+    printf("Produto ID %lld removido do indice (remocao logica)!\n", (long long)id_produto);
+    printf("Chaves ativas restantes: %d\n", g_produtos_btree->total_keys);
+    printf("Total de itens removidos: %zu\n", g_btree_deleted_len);
+    printf("Tempo de remocao (Arvore B): %.6f segundos\n", time_spent);
+    printf("==================================================\n");
+    printf("\nNOTA: O produto ainda existe no arquivo joias.dat\n");
+    printf("Para remover do arquivo, use a opcao 5.\n");
 }
 
 // ========== INSERCAO/REMOCAO INCREMENTAL - TABELA HASH ==========
