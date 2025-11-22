@@ -30,6 +30,6 @@
 | Operação            | Tempo de Execução (segundos) |
 |---------------------|------------------------------|
 | Inserção de Produto | 0.000091                     |
-| Remoção de Produto  | 0.000091                     |
-| Inserção de Pedido  | 0.000091                     |
-| Remoção de Pedido   | 0.000091                     |
+| Remoção de Produto  | 0.000003                     |
+| Inserção de Pedido  | 0.000114                     |
+| Remoção de Pedido   | 0.000002                     |
