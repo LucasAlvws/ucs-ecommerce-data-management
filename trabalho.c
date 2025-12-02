@@ -5,6 +5,7 @@
 #include <errno.h>
 #include <ctype.h>
 #include <limits.h>
+#include <time.h>
 
 #define PATH_JOIAS        "joias.dat"
 #define PATH_JOIAS_IDX    "joias.idx"
@@ -16,6 +17,14 @@
 #define NOME_MAX  128
 #define JOIAS_INDEX_STEP 256
 #define MAX_ITENS_PEDIDO 50
+
+// ========================================================================
+// TRABALHO II - DEFINIÇÕES PARA ÍNDICES EM MEMÓRIA
+// ========================================================================
+#define BLOCK_SIZE 4096
+#define BTREE_ORDER ((BLOCK_SIZE - sizeof(int) - sizeof(int)) / (sizeof(int64_t) + sizeof(uint64_t) + sizeof(void*)))
+#define BTREE_MIN_KEYS ((BTREE_ORDER - 1) / 2)
+#define HASH_TABLE_SIZE 10007
 
 typedef struct {
     int64_t id_produto;
@@ -41,7 +50,74 @@ typedef struct {
     uint64_t offset;
 } PedidosIdxEntry;
 
+// ========================================================================
+// TRABALHO II - ESTRUTURAS DA ÁRVORE B
+// ========================================================================
+typedef struct BTreeNode {
+    int n_keys;
+    int is_leaf;
+    int64_t keys[BTREE_ORDER - 1];
+    uint64_t offsets[BTREE_ORDER - 1];
+    struct BTreeNode* children[BTREE_ORDER];
+} BTreeNode;
+
+typedef struct {
+    BTreeNode* root;
+    int total_nodes;
+    int total_keys;
+} BTree;
+
+// ========================================================================
+// TRABALHO II - ESTRUTURAS DA TABELA HASH
+// Índice sobre coluna SECUNDÁRIA (não-ordenada): primeiro produto do pedido
+// ========================================================================
+typedef struct HashNode {
+    int64_t id_produto;     // Chave: primeiro produto do pedido (coluna secundária)
+    int64_t id_pedido;      // Valor: ID do pedido que contém esse produto
+    uint64_t offset;        // Offset do pedido no arquivo
+    struct HashNode* next;
+} HashNode;
+
+typedef struct {
+    HashNode** buckets;
+    int size;
+    int total_entries;
+    int collisions;
+} HashTable;
+
 static void die(const char* m){ perror(m); exit(1); }
+
+// TRABALHO II: Deleção lógica na Árvore B (lista de IDs removidos)
+static int64_t* g_btree_deleted_ids = NULL;
+static size_t g_btree_deleted_len = 0, g_btree_deleted_cap = 0;
+static void btree_deleted_clear(void){
+    free(g_btree_deleted_ids); g_btree_deleted_ids=NULL; g_btree_deleted_len=0; g_btree_deleted_cap=0;
+}
+static int btree_deleted_contains(int64_t id){
+    for(size_t i=0;i<g_btree_deleted_len;i++) if(g_btree_deleted_ids[i]==id) return 1;
+    return 0;
+}
+static void btree_deleted_add(int64_t id){
+    if(btree_deleted_contains(id)) return;
+    if(g_btree_deleted_len==g_btree_deleted_cap){
+        size_t nc = g_btree_deleted_cap? g_btree_deleted_cap*2 : 64;
+        int64_t* nv = (int64_t*)realloc(g_btree_deleted_ids, nc*sizeof(int64_t));
+        if(!nv) die("realloc btree_deleted");
+        g_btree_deleted_ids = nv; g_btree_deleted_cap = nc;
+    }
+    g_btree_deleted_ids[g_btree_deleted_len++] = id;
+}
+
+// Gerar ID único baseado em timestamp
+static int64_t gerar_id(void) {
+    return (int64_t)time(NULL) * 1000000 + (int64_t)(rand() % 1000000);
+}
+
+// Forward declarations
+static void build_joias_idx(void);
+static void rebuild_pedidos_idx(void);
+static void construir_indice_parcial(void) { build_joias_idx(); }
+static void construir_indice_exaustivo(void) { rebuild_pedidos_idx(); }
 static size_t fsize(FILE* f){
     long p=ftell(f); if(p<0) die("ftell");
     if(fseek(f,0,SEEK_END)!=0) die("fseek end");
@@ -272,6 +348,10 @@ static void cmd_import(const char* csv){
 
 static void cmd_find_prod(const char* s){
     int64_t target; if(!try_i64(s,&target)){ fprintf(stderr,"id_produto inválido\n"); return; }
+    
+    // TRABALHO II: Medição de tempo adicionada
+    clock_t start_time = clock();
+    
     FILE* fidx=fopen(PATH_JOIAS_IDX,"rb"); FILE* fdat=fopen(PATH_JOIAS,"rb");
     if(!fidx||!fdat) die("abrir joias.*");
     size_t sz=fsize(fidx), n=sz/sizeof(JoiasIdxEntry);
@@ -303,11 +383,21 @@ static void cmd_find_prod(const char* s){
         cnt++;
     }
     if(!found) printf("Produto %lld não encontrado.\n", (long long)target);
+    
+    // TRABALHO II: Exibir tempo de busca
+    clock_t end_time = clock();
+    double time_spent = (double)(end_time - start_time) / CLOCKS_PER_SEC;
+    printf("Tempo de busca (indice parcial): %.6f segundos\n", time_spent);
+    
 done: if(fidx) fclose(fidx); if(fdat) fclose(fdat);
 }
 
 static void cmd_find_pedido(const char* s){
     int64_t target; if(!try_i64(s,&target)){ fprintf(stderr,"id_pedido inválido\n"); return; }
+    
+    // TRABALHO II: Medição de tempo adicionada
+    clock_t start_time = clock();
+    
     FILE* idx=fopen(PATH_PEDIDOS_IDX,"rb"); if(!idx){ printf("Índice de pedidos ausente. Faça import/insert/remove primeiro.\n"); return; }
     size_t sz=fsize(idx), n=sz/sizeof(PedidosIdxEntry);
     
@@ -323,6 +413,10 @@ static void cmd_find_pedido(const char* s){
     if(lo==n){
         printf("Pedido %lld não encontrado.\n",(long long)target);
         fclose(idx);
+        // TRABALHO II: Exibir tempo mesmo quando não encontrado
+        clock_t end_time = clock();
+        double time_spent = (double)(end_time - start_time) / CLOCKS_PER_SEC;
+        printf("Tempo de busca (indice exaustivo): %.6f segundos\n", time_spent);
         return;
     }
     
@@ -333,6 +427,10 @@ static void cmd_find_pedido(const char* s){
     if(found_entry.id_pedido!=target){
         printf("Pedido %lld não encontrado.\n",(long long)target);
         fclose(idx);
+        // TRABALHO II: Exibir tempo mesmo quando não encontrado
+        clock_t end_time = clock();
+        double time_spent = (double)(end_time - start_time) / CLOCKS_PER_SEC;
+        printf("Tempo de busca (indice exaustivo): %.6f segundos\n", time_spent);
         return;
     }
     
@@ -347,6 +445,11 @@ static void cmd_find_pedido(const char* s){
         printf("  item%03d -> id_produto=%lld\n", i+1, (long long)ped.ids_produtos[i]);
     }
     fclose(f);
+    
+    // TRABALHO II: Exibir tempo de busca
+    clock_t end_time = clock();
+    double time_spent = (double)(end_time - start_time) / CLOCKS_PER_SEC;
+    printf("Tempo de busca (indice exaustivo): %.6f segundos\n", time_spent);
 }
 
 static void cmd_list_prod_n(long n){
@@ -776,7 +879,668 @@ static void read_line(const char *prompt, char *buf, size_t n){
 }
 static void press_enter(void){
     printf("\n(Pressione ENTER para continuar) "); fflush(stdout);
-    int c; while((c=getchar())!='\n' && c!=EOF);
+    getchar();
+}
+
+// ========== FUNCOES DA ARVORE B ==========
+
+// Criar novo nodo da árvore B
+static BTreeNode* btree_create_node(int is_leaf) {
+    BTreeNode* node = (BTreeNode*)malloc(sizeof(BTreeNode));
+    if (!node) die("malloc btree node");
+    node->n_keys = 0;
+    node->is_leaf = is_leaf;
+    for (size_t i = 0; i < BTREE_ORDER; i++) {
+        node->children[i] = NULL;
+    }
+    return node;
+}
+
+// Criar árvore B vazia
+static BTree* btree_create(void) {
+    BTree* tree = (BTree*)malloc(sizeof(BTree));
+    if (!tree) die("malloc btree");
+    tree->root = btree_create_node(1);
+    tree->total_nodes = 1;
+    tree->total_keys = 0;
+    return tree;
+}
+
+// Buscar chave na árvore B
+static int btree_search(BTreeNode* node, int64_t key, uint64_t* offset) {
+    if (!node) return 0;
+    
+    int i = 0;
+    while (i < node->n_keys && key > node->keys[i]) {
+        i++;
+    }
+    
+    if (i < node->n_keys && key == node->keys[i]) {
+        *offset = node->offsets[i];
+        return 1;
+    }
+    
+    if (node->is_leaf) {
+        return 0;
+    }
+    
+    return btree_search(node->children[i], key, offset);
+}
+
+// Dividir filho cheio
+static void btree_split_child(BTreeNode* parent, int index, BTreeNode* child) {
+    int mid = (BTREE_ORDER - 1) / 2;
+    BTreeNode* new_node = btree_create_node(child->is_leaf);
+    new_node->n_keys = BTREE_ORDER - 1 - mid - 1;
+    
+    // Copiar segunda metade das chaves para o novo nodo
+    for (int i = 0; i < new_node->n_keys; i++) {
+        new_node->keys[i] = child->keys[mid + 1 + i];
+        new_node->offsets[i] = child->offsets[mid + 1 + i];
+    }
+    
+    // Copiar ponteiros dos filhos se não for folha
+    if (!child->is_leaf) {
+        for (int i = 0; i <= new_node->n_keys; i++) {
+            new_node->children[i] = child->children[mid + 1 + i];
+        }
+    }
+    
+    child->n_keys = mid;
+    
+    // Inserir novo filho no pai
+    for (int i = parent->n_keys; i > index; i--) {
+        parent->children[i + 1] = parent->children[i];
+    }
+    parent->children[index + 1] = new_node;
+    
+    // Mover chaves do pai
+    for (int i = parent->n_keys - 1; i >= index; i--) {
+        parent->keys[i + 1] = parent->keys[i];
+        parent->offsets[i + 1] = parent->offsets[i];
+    }
+    
+    parent->keys[index] = child->keys[mid];
+    parent->offsets[index] = child->offsets[mid];
+    parent->n_keys++;
+}
+
+// Inserir em nodo não cheio
+static void btree_insert_non_full(BTreeNode* node, int64_t key, uint64_t offset) {
+    int i = node->n_keys - 1;
+    
+    if (node->is_leaf) {
+        // Inserir na posição correta
+        while (i >= 0 && key < node->keys[i]) {
+            node->keys[i + 1] = node->keys[i];
+            node->offsets[i + 1] = node->offsets[i];
+            i--;
+        }
+        node->keys[i + 1] = key;
+        node->offsets[i + 1] = offset;
+        node->n_keys++;
+    } else {
+        // Encontrar filho apropriado
+        while (i >= 0 && key < node->keys[i]) {
+            i--;
+        }
+        i++;
+        
+        if (node->children[i]->n_keys == BTREE_ORDER - 1) {
+            btree_split_child(node, i, node->children[i]);
+            if (key > node->keys[i]) {
+                i++;
+            }
+        }
+        btree_insert_non_full(node->children[i], key, offset);
+    }
+}
+
+// Inserir chave na árvore B
+static void btree_insert(BTree* tree, int64_t key, uint64_t offset) {
+    BTreeNode* root = tree->root;
+    
+    if (root->n_keys == BTREE_ORDER - 1) {
+        BTreeNode* new_root = btree_create_node(0);
+        new_root->children[0] = root;
+        btree_split_child(new_root, 0, root);
+        tree->root = new_root;
+        tree->total_nodes++;
+        btree_insert_non_full(new_root, key, offset);
+    } else {
+        btree_insert_non_full(root, key, offset);
+    }
+    tree->total_keys++;
+}
+
+// Liberar memória da árvore B
+static void btree_free_node(BTreeNode* node) {
+    if (!node) return;
+    if (!node->is_leaf) {
+        for (int i = 0; i <= node->n_keys; i++) {
+            btree_free_node(node->children[i]);
+        }
+    }
+    free(node);
+}
+
+static void btree_free(BTree* tree) {
+    if (!tree) return;
+    btree_free_node(tree->root);
+    free(tree);
+}
+
+static BTree* g_produtos_btree = NULL;
+static HashTable* g_pedidos_hash = NULL;
+
+// Construir índice da árvore B a partir do arquivo de produtos
+static void btree_build_from_file(void) {
+    clock_t start = clock();
+    
+    FILE* f = fopen(PATH_JOIAS, "rb");
+    if (!f) {
+        printf("Erro: arquivo %s não encontrado. Execute a importação primeiro.\n", PATH_JOIAS);
+        return;
+    }
+    
+    // Liberar árvore anterior se existir
+    if (g_produtos_btree) {
+        btree_free(g_produtos_btree);
+    }
+    // TRABALHO II: Limpar lista de removidos ao reconstruir
+    btree_deleted_clear();
+    
+    g_produtos_btree = btree_create();
+    
+    Produto p;
+    uint64_t offset = 0;
+    int count = 0;
+    
+    while (fread(&p, sizeof(Produto), 1, f) == 1) {
+        btree_insert(g_produtos_btree, p.id_produto, offset);
+        offset += sizeof(Produto);
+        count++;
+    }
+    
+    fclose(f);
+    
+    clock_t end = clock();
+    double time_spent = (double)(end - start) / CLOCKS_PER_SEC;
+    
+    printf("\n========== ARVORE B - INDICE EM MEMORIA ==========\n");
+    printf("Arquivo: %s\n", PATH_JOIAS);
+    printf("Ordem da arvore: %zu\n", (size_t)BTREE_ORDER);
+    printf("Tamanho do bloco: %d bytes\n", BLOCK_SIZE);
+    printf("Produtos indexados: %d\n", count);
+    printf("Total de nodos: %d\n", g_produtos_btree->total_nodes);
+    printf("Total de chaves: %d\n", g_produtos_btree->total_keys);
+    printf("Tempo de criacao: %.6f segundos\n", time_spent);
+    printf("==================================================\n");
+}
+
+// Buscar produto usando árvore B
+static void btree_buscar_produto(const char* id_str) {
+    if (!g_produtos_btree) {
+        printf("Erro: Indice da arvore B nao foi criado. Use a opcao 14 primeiro.\n");
+        return;
+    }
+    
+    int64_t id = 0;
+    if (!try_i64(id_str, &id)) {
+        printf("ID invalido.\n");
+        return;
+    }
+    
+    clock_t start = clock();
+    
+    uint64_t offset;
+    if (btree_search(g_produtos_btree->root, id, &offset) && !btree_deleted_contains(id)) {
+        FILE* f = fopen(PATH_JOIAS, "rb");
+        if (!f) {
+            printf("Erro ao abrir arquivo de produtos.\n");
+            return;
+        }
+        
+        if (fseek(f, (long)offset, SEEK_SET) != 0) {
+            printf("Erro ao posicionar no arquivo.\n");
+            fclose(f);
+            return;
+        }
+        
+        Produto p;
+        if (fread(&p, sizeof(Produto), 1, f) == 1) {
+            clock_t end = clock();
+            double time_spent = (double)(end - start) / CLOCKS_PER_SEC;
+            
+            printf("\n--- Produto encontrado (Arvore B) ---\n");
+            printf("ID: %lld\n", (long long)p.id_produto);
+            printf("Categoria: %s\n", p.categoria);
+            printf("Marca: %s\n", p.marca);
+            printf("Nome: %s\n", p.nome);
+            printf("Preco: %.2f\n", p.preco);
+            printf("Tempo de busca: %.6f segundos\n", time_spent);
+        } else {
+            printf("Erro ao ler produto.\n");
+        }
+        fclose(f);
+    } else {
+        clock_t end = clock();
+        double time_spent = (double)(end - start) / CLOCKS_PER_SEC;
+        if (btree_deleted_contains(id)) {
+            printf("Produto ID %lld foi removido do indice em memoria.\n", (long long)id);
+        } else {
+            printf("Produto ID %lld nao encontrado.\n", (long long)id);
+        }
+        printf("Tempo de busca: %.6f segundos\n", time_spent);
+    }
+}
+
+// ========== FUNCOES DA TABELA HASH ==========
+
+static unsigned int hash_function(int64_t key) {
+    return (unsigned int)(key % HASH_TABLE_SIZE);
+}
+
+static HashTable* hash_create(void) {
+    HashTable* ht = (HashTable*)malloc(sizeof(HashTable));
+    if (!ht) die("malloc hashtable");
+    ht->buckets = (HashNode**)calloc(HASH_TABLE_SIZE, sizeof(HashNode*));
+    if (!ht->buckets) die("calloc buckets");
+    ht->size = HASH_TABLE_SIZE;
+    ht->total_entries = 0;
+    ht->collisions = 0;
+    return ht;
+}
+
+// TRABALHO II: Inserir na hash indexando por id_produto (coluna secundária)
+static void hash_insert(HashTable* ht, int64_t id_produto, int64_t id_pedido, uint64_t offset) {
+    unsigned int index = hash_function(id_produto);
+    HashNode* new_node = (HashNode*)malloc(sizeof(HashNode));
+    if (!new_node) die("malloc hashnode");
+    new_node->id_produto = id_produto;
+    new_node->id_pedido = id_pedido;
+    new_node->offset = offset;
+    new_node->next = NULL;
+    
+    if (ht->buckets[index] != NULL) {
+        ht->collisions++;
+        new_node->next = ht->buckets[index];
+    }
+    ht->buckets[index] = new_node;
+    ht->total_entries++;
+}
+
+// TRABALHO II: Buscar pedidos que contêm um determinado produto
+static int hash_search(HashTable* ht, int64_t id_produto, int64_t* id_pedido, uint64_t* offset) {
+    unsigned int index = hash_function(id_produto);
+    HashNode* node = ht->buckets[index];
+    
+    while (node != NULL) {
+        if (node->id_produto == id_produto) {
+            *id_pedido = node->id_pedido;
+            *offset = node->offset;
+            return 1;
+        }
+        node = node->next;
+    }
+    return 0;
+}
+
+static void hash_free(HashTable* ht) {
+    if (!ht) return;
+    for (int i = 0; i < ht->size; i++) {
+        HashNode* node = ht->buckets[i];
+        while (node != NULL) {
+            HashNode* temp = node;
+            node = node->next;
+            free(temp);
+        }
+    }
+    free(ht->buckets);
+    free(ht);
+}
+
+// TRABALHO II: Construir hash indexando pelo PRIMEIRO PRODUTO de cada pedido
+// Isso permite buscar "quais pedidos contêm o produto X?"
+static void hash_build_from_file(void) {
+    clock_t start = clock();
+    
+    FILE* f = fopen(PATH_PEDIDOS, "rb");
+    if (!f) {
+        printf("Erro: arquivo %s não encontrado. Execute a importação primeiro.\n", PATH_PEDIDOS);
+        return;
+    }
+    
+    if (g_pedidos_hash) {
+        hash_free(g_pedidos_hash);
+    }
+    
+    g_pedidos_hash = hash_create();
+    
+    Pedido p;
+    uint64_t offset = 0;
+    int count = 0;
+    int pedidos_vazios = 0;
+    
+    while (fread(&p, sizeof(Pedido), 1, f) == 1) {
+        // Indexar pelo primeiro produto do pedido (coluna secundária)
+        if (p.n_itens > 0) {
+            hash_insert(g_pedidos_hash, p.ids_produtos[0], p.id_pedido, offset);
+            count++;
+        } else {
+            pedidos_vazios++;
+        }
+        offset += sizeof(Pedido);
+    }
+    
+    fclose(f);
+    
+    clock_t end = clock();
+    double time_spent = (double)(end - start) / CLOCKS_PER_SEC;
+    
+    printf("\n========== TABELA HASH - INDICE EM MEMORIA ==========\n");
+    printf("Arquivo: %s\n", PATH_PEDIDOS);
+    printf("Coluna indexada: PRIMEIRO PRODUTO do pedido (secundaria)\n");
+    printf("Tamanho da tabela: %d\n", HASH_TABLE_SIZE);
+    printf("Pedidos indexados: %d\n", count);
+    if (pedidos_vazios > 0) {
+        printf("Pedidos vazios (ignorados): %d\n", pedidos_vazios);
+    }
+    printf("Total de entradas: %d\n", g_pedidos_hash->total_entries);
+    printf("Colisoes: %d\n", g_pedidos_hash->collisions);
+    printf("Fator de carga: %.2f%%\n", (g_pedidos_hash->total_entries * 100.0) / g_pedidos_hash->size);
+    printf("Tempo de criacao: %.6f segundos\n", time_spent);
+    printf("=====================================================\n");
+}
+
+// TRABALHO II: Buscar pedidos que contêm um determinado PRODUTO
+static void hash_buscar_pedido(const char* id_str) {
+    if (!g_pedidos_hash) {
+        printf("Erro: Indice da tabela hash nao foi criado. Use a opcao 17 primeiro.\n");
+        return;
+    }
+    
+    int64_t id_produto = 0;
+    if (!try_i64(id_str, &id_produto)) {
+        printf("ID de produto invalido.\n");
+        return;
+    }
+    
+    clock_t start = clock();
+    
+    int64_t id_pedido;
+    uint64_t offset;
+    if (hash_search(g_pedidos_hash, id_produto, &id_pedido, &offset)) {
+        FILE* f = fopen(PATH_PEDIDOS, "rb");
+        if (!f) {
+            printf("Erro ao abrir arquivo de pedidos.\n");
+            return;
+        }
+        
+        if (fseek(f, (long)offset, SEEK_SET) != 0) {
+            printf("Erro ao posicionar no arquivo.\n");
+            fclose(f);
+            return;
+        }
+        
+        Pedido p;
+        if (fread(&p, sizeof(Pedido), 1, f) == 1) {
+            clock_t end = clock();
+            double time_spent = (double)(end - start) / CLOCKS_PER_SEC;
+            
+            printf("\n--- Pedido encontrado (Tabela Hash - busca por produto) ---\n");
+            printf("Produto buscado: %lld\n", (long long)id_produto);
+            printf("Pedido ID: %lld\n", (long long)p.id_pedido);
+            printf("Numero de itens: %d\n", p.n_itens);
+            printf("IDs dos produtos: ");
+            for (int32_t i = 0; i < p.n_itens && i < 10; i++) {
+                printf("%lld ", (long long)p.ids_produtos[i]);
+            }
+            if (p.n_itens > 10) printf("...");
+            printf("\n");
+            printf("Tempo de busca: %.6f segundos\n", time_spent);
+        } else {
+            printf("Erro ao ler pedido.\n");
+        }
+        fclose(f);
+    } else {
+        clock_t end = clock();
+        double time_spent = (double)(end - start) / CLOCKS_PER_SEC;
+        printf("Nenhum pedido encontrado contendo o produto ID %lld.\n", (long long)id_produto);
+        printf("Tempo de busca: %.6f segundos\n", time_spent);
+    }
+}
+
+// ========== INSERCAO/REMOCAO INCREMENTAL - ARVORE B ==========
+
+static void btree_inserir_produto_incremental(void) {
+    if (!g_produtos_btree) {
+        printf("Erro: Arvore B nao foi criada. Use a opcao 13 primeiro.\n");
+        return;
+    }
+    
+    char categoria[64], marca[64], nome[256], preco_str[32];
+    read_line("Categoria: ", categoria, sizeof(categoria));
+    if(categoria[0]=='\0'){ printf("Categoria vazia.\n"); return; }
+    read_line("Marca: ", marca, sizeof(marca));
+    if(marca[0]=='\0'){ printf("Marca vazia.\n"); return; }
+    read_line("Nome: ", nome, sizeof(nome));
+    if(nome[0]=='\0'){ printf("Nome vazio.\n"); return; }
+    read_line("Preco: ", preco_str, sizeof(preco_str));
+    double preco = atof(preco_str);
+    if(preco <= 0){ printf("Preco invalido.\n"); return; }
+    
+    clock_t start = clock();
+    
+    // Adicionar no arquivo
+    FILE* f = fopen("joias.dat", "ab");
+    if(!f){ printf("Erro ao abrir joias.dat\n"); return; }
+    
+    uint64_t offset = ftell(f);
+    Produto p;
+    p.id_produto = gerar_id();
+    strncpy(p.categoria, categoria, sizeof(p.categoria)-1);
+    p.categoria[sizeof(p.categoria)-1] = '\0';
+    strncpy(p.marca, marca, sizeof(p.marca)-1);
+    p.marca[sizeof(p.marca)-1] = '\0';
+    strncpy(p.nome, nome, sizeof(p.nome)-1);
+    p.nome[sizeof(p.nome)-1] = '\0';
+    p.preco = preco;
+    
+    if(fwrite(&p, sizeof(Produto), 1, f) != 1){
+        printf("Erro ao escrever produto.\n");
+        fclose(f);
+        return;
+    }
+    fclose(f);
+    
+    // Inserir na Árvore B
+    btree_insert(g_produtos_btree, p.id_produto, offset);
+    
+    clock_t end = clock();
+    double time_spent = (double)(end - start) / CLOCKS_PER_SEC;
+    
+    printf("\n==================================================\n");
+    printf("Produto adicionado com sucesso!\n");
+    printf("ID gerado: %lld\n", (long long)p.id_produto);
+    printf("Offset no arquivo: %llu\n", (unsigned long long)offset);
+    printf("Tempo de insercao (arquivo + Arvore B): %.6f segundos\n", time_spent);
+    printf("Total de produtos na Arvore B: %d\n", g_produtos_btree->total_keys);
+    printf("==================================================\n");
+    
+    // Reconstruir índice parcial
+    construir_indice_parcial();
+}
+
+static void btree_remover_produto_incremental(void) {
+    if (!g_produtos_btree) {
+        printf("Erro: Arvore B nao foi criada. Use a opcao 13 primeiro.\n");
+        return;
+    }
+    
+    char id_str[64];
+    read_line("id_produto: ", id_str, sizeof(id_str));
+    if(id_str[0]=='\0'){ printf("Valor invalido.\n"); return; }
+    
+    int64_t id_produto;
+    if(!try_i64(id_str, &id_produto)){ printf("ID invalido.\n"); return; }
+    
+    clock_t start = clock();
+    
+    // Verificar se o produto existe na árvore B
+    uint64_t offset;
+    if (!btree_search(g_produtos_btree->root, id_produto, &offset)) {
+        clock_t end = clock();
+        double time_spent = (double)(end - start) / CLOCKS_PER_SEC;
+        printf("Produto ID %lld nao encontrado na Arvore B.\n", (long long)id_produto);
+        printf("Tempo de busca: %.6f segundos\n", time_spent);
+        return;
+    }
+    
+    // TRABALHO II: Remoção incremental via deleção lógica
+    // Adicionar ID à lista de produtos removidos
+    if (btree_deleted_contains(id_produto)) {
+        clock_t end = clock();
+        double time_spent = (double)(end - start) / CLOCKS_PER_SEC;
+        printf("Produto ID %lld ja foi removido anteriormente.\n", (long long)id_produto);
+        printf("Tempo de verificacao: %.6f segundos\n", time_spent);
+        return;
+    }
+    
+    btree_deleted_add(id_produto);
+    g_produtos_btree->total_keys--; // Decrementar contador lógico
+    
+    clock_t end = clock();
+    double time_spent = (double)(end - start) / CLOCKS_PER_SEC;
+    
+    printf("\n==================================================\n");
+    printf("Produto ID %lld removido do indice (remocao logica)!\n", (long long)id_produto);
+    printf("Chaves ativas restantes: %d\n", g_produtos_btree->total_keys);
+    printf("Total de itens removidos: %zu\n", g_btree_deleted_len);
+    printf("Tempo de remocao (Arvore B): %.6f segundos\n", time_spent);
+    printf("==================================================\n");
+    printf("\nNOTA: O produto ainda existe no arquivo joias.dat\n");
+    printf("Para remover do arquivo, use a opcao 5.\n");
+}
+
+// ========== INSERCAO/REMOCAO INCREMENTAL - TABELA HASH ==========
+
+static void hash_inserir_pedido_incremental(void) {
+    if (!g_pedidos_hash) {
+        printf("Erro: Tabela Hash nao foi criada. Use a opcao 15 primeiro.\n");
+        return;
+    }
+    
+    char n_str[32];
+    read_line("Numero de itens: ", n_str, sizeof(n_str));
+    int n = atoi(n_str);
+    if(n <= 0 || n > MAX_ITENS_PEDIDO){
+        printf("Numero invalido (1-%d).\n", MAX_ITENS_PEDIDO);
+        return;
+    }
+    
+    clock_t start = clock();
+    
+    // Adicionar no arquivo
+    FILE* f = fopen("pedidos.dat", "ab");
+    if(!f){ printf("Erro ao abrir pedidos.dat\n"); return; }
+    
+    uint64_t offset = ftell(f);
+    Pedido ped;
+    ped.id_pedido = gerar_id();
+    ped.n_itens = n;
+    
+    for(int i=0; i<n; i++){
+        char id_str[64];
+        printf("  Item %d - id_produto: ", i+1);
+        if(!fgets(id_str, sizeof(id_str), stdin)){ clearerr(stdin); i--; continue; }
+        ped.ids_produtos[i] = atoll(id_str);
+    }
+    
+    if(fwrite(&ped, sizeof(Pedido), 1, f) != 1){
+        printf("Erro ao escrever pedido.\n");
+        fclose(f);
+        return;
+    }
+    fclose(f);
+    
+    // Inserir na Tabela Hash (indexando pelo primeiro produto)
+    if (n > 0) {
+        hash_insert(g_pedidos_hash, ped.ids_produtos[0], ped.id_pedido, offset);
+    }
+    
+    clock_t end = clock();
+    double time_spent = (double)(end - start) / CLOCKS_PER_SEC;
+    
+    printf("\n=====================================================\n");
+    printf("Pedido adicionado com sucesso!\n");
+    printf("ID do pedido gerado: %lld\n", (long long)ped.id_pedido);
+    printf("Primeiro produto: %lld\n", (long long)ped.ids_produtos[0]);
+    printf("Offset no arquivo: %llu\n", (unsigned long long)offset);
+    printf("Tempo de insercao (arquivo + Hash): %.6f segundos\n", time_spent);
+    printf("Total de pedidos na Hash: %d\n", g_pedidos_hash->total_entries);
+    printf("Colisoes: %d\n", g_pedidos_hash->collisions);
+    printf("=====================================================\n");
+    
+    // Reconstruir índice exaustivo
+    construir_indice_exaustivo();
+}
+
+// TRABALHO II: Remover entrada da hash por id_produto
+static int hash_remove(HashTable* ht, int64_t id_produto) {
+    unsigned int index = hash_function(id_produto);
+    HashNode* node = ht->buckets[index];
+    HashNode* prev = NULL;
+    
+    while (node != NULL) {
+        if (node->id_produto == id_produto) {
+            if (prev == NULL) {
+                ht->buckets[index] = node->next;
+            } else {
+                prev->next = node->next;
+            }
+            free(node);
+            ht->total_entries--;
+            return 1;
+        }
+        prev = node;
+        node = node->next;
+    }
+    return 0;
+}
+
+static void hash_remover_pedido_incremental(void) {
+    if (!g_pedidos_hash) {
+        printf("Erro: Tabela Hash nao foi criada. Use a opcao 17 primeiro.\n");
+        return;
+    }
+    
+    char id[64];
+    read_line("id_produto (para remover da hash): ", id, sizeof(id));
+    if(id[0]=='\0'){ printf("Valor invalido.\n"); return; }
+    int64_t id_produto = atoll(id);
+    
+    clock_t start = clock();
+    
+    // Remover da Tabela Hash
+    int found = hash_remove(g_pedidos_hash, id_produto);
+    
+    clock_t end = clock();
+    double time_spent = (double)(end - start) / CLOCKS_PER_SEC;
+    
+    if (found) {
+        printf("\n=====================================================\n");
+        printf("Entrada removida da Tabela Hash!\n");
+        printf("Produto ID: %lld\n", (long long)id_produto);
+        printf("Tempo de remocao: %.6f segundos\n", time_spent);
+        printf("Total de entradas na Hash: %d\n", g_pedidos_hash->total_entries);
+        printf("=====================================================\n");
+        printf("\nNOTA: Apenas a entrada do indice foi removida.\n");
+        printf("O pedido ainda existe no arquivo pedidos.dat\n");
+    } else {
+        printf("Produto ID %lld nao encontrado na Tabela Hash.\n", (long long)id_produto);
+        printf("Tempo de busca: %.6f segundos\n", time_spent);
+    }
 }
 
 static void menu_loop(void){
@@ -797,8 +1561,20 @@ static void menu_loop(void){
         printf("10) Joia mais cara\n");
         printf("11) Vendas por nome\n");
         printf("12) Vendas por categoria\n");
-        printf("13) Sair\n");
-        printf("-------------------------------------\n");
+        printf("=====================================\n");
+        printf("   TRABALHO II - INDICES EM MEMORIA\n");
+        printf("=====================================\n");
+        printf("13) Criar indice Arvore B (produtos)\n");
+        printf("14) Buscar produto com Arvore B\n");
+        printf("15) Inserir produto (Arvore B incremental)\n");
+        printf("16) Remover produto (Arvore B incremental)\n");
+        printf("17) Criar indice Hash (1o produto pedido)\n");
+        printf("18) Buscar pedido por produto (Hash)\n");
+        printf("19) Inserir pedido (Hash incremental)\n");
+        printf("20) Remover produto da Hash\n");
+        printf("=====================================\n");
+        printf("21) Sair\n");
+        printf("=====================================\n");
         printf("Escolha: "); fflush(stdout);
         if(!fgets(buf, sizeof(buf), stdin)) { clearerr(stdin); continue; }
         int opt = atoi(buf);
@@ -883,7 +1659,46 @@ static void menu_loop(void){
             q_vendas_por_categoria(cat);
             press_enter();
         } else if(opt == 13){
-            printf("Saindo.\n"); break;
+            btree_build_from_file();
+            press_enter();
+        } else if(opt == 14){
+            char id[64];
+            read_line("id_produto: ", id, sizeof(id));
+            if(id[0]=='\0'){ printf("Valor invalido.\n"); press_enter(); continue; }
+            btree_buscar_produto(id);
+            press_enter();
+        } else if(opt == 15){
+            btree_inserir_produto_incremental();
+            press_enter();
+        } else if(opt == 16){
+            btree_remover_produto_incremental();
+            press_enter();
+        } else if(opt == 17){
+            hash_build_from_file();
+            press_enter();
+        } else if(opt == 18){
+            char id[64];
+            read_line("id_produto (para buscar pedidos): ", id, sizeof(id));
+            if(id[0]=='\0'){ printf("Valor invalido.\n"); press_enter(); continue; }
+            hash_buscar_pedido(id);
+            press_enter();
+        } else if(opt == 19){
+            hash_inserir_pedido_incremental();
+            press_enter();
+        } else if(opt == 20){
+            hash_remover_pedido_incremental();
+            press_enter();
+        } else if(opt == 21){
+            printf("Saindo.\n");
+            if(g_produtos_btree) {
+                btree_free(g_produtos_btree);
+                g_produtos_btree = NULL;
+            }
+            if(g_pedidos_hash) {
+                hash_free(g_pedidos_hash);
+                g_pedidos_hash = NULL;
+            }
+            break;
         } else {
             printf("Opcao invalida.\n");
         }
